@@ -195,6 +195,7 @@ if(a==='import-trigger'){$('import-file').click();return}
   for(const a of EXTRA)FOODS.push({id:FOODS.length,name:a[0],k:a[1],p:a[2],f:a[3],c:a[4],group:a[5],defaultGrams:a[6],note:a[7],source:'estimate'});
   const baseSettings=renderSettings,baseHome=renderHome,baseMethod=renderMethod,baseSearch=renderSearchResults;
   let aiPurpose='daily';
+  aiRange=1;
   const safe=(x)=>esc(x??'');
   const personal=()=>settings.personal||{};
   const field=(k,defaultValue='')=>personal()[k]??defaultValue;
@@ -272,7 +273,9 @@ if(a==='import-trigger'){$('import-file').click();return}
     const root=$('search-results');if(!root)return;
     const q=searchText.replace(/[\s　]/g,'').toLowerCase();
     const arr=FOODS.filter(f=>(f.name+f.group+(f.note||'')).replace(/[\s　]/g,'').toLowerCase().includes(q)).slice(0,30);
+    const previousSelection=selFood;
     if(!arr.some(f=>f.id===selFood))selFood=arr.length?arr[0].id:null;
+    if(selFood!==previousSelection){const chosen=FOODS.find(f=>f.id===selFood),g=$('food-grams');if(g&&chosen)g.value=chosen.defaultGrams||150;}
     root.innerHTML=arr.length?arr.map(f=>'<button class="suggestion '+(selFood===f.id?'active':'')+'" type="button" data-action="select-food" data-id="'+f.id+'"><span><strong>'+safe(f.name)+'</strong><br><small>'+safe(f.group)+'</small></span><small>'+nf(f.k)+' kcal/100g '+(selFood===f.id?'✓':'')+'</small></button>').join(''):'<p class="caption">該当する食品がありません。自由入力から登録できます。</p>';
     const selected=FOODS.find(f=>f.id===selFood);
     const caption=$('food-extra-note');if(caption)caption.textContent=selected?.note?'目安：'+selected.note:'';
@@ -361,7 +364,7 @@ if(a==='import-trigger'){$('import-file').click();return}
       searchText=btn.dataset.term;const el=$('food-query');if(el)el.value=searchText;
       renderSearchResults();updateSearchPreview();return;
     }
-    if(a==='ai-purpose'){aiPurpose=btn.dataset.purpose;render();return;}
+    if(a==='ai-purpose'){aiPurpose=btn.dataset.purpose;aiRange=aiPurpose==='week'?7:1;render();return;}
     if(a==='save-profile'){
       const number=(id,min,max)=>{const raw=$(id).value.trim();if(!raw)return null;const n=Number(raw);if(!Number.isFinite(n)||n<min||n>max)throw Error('入力した数値を確認してね：'+id);return n};
       try{
