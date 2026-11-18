@@ -553,7 +553,279 @@ if(a==='import-trigger'){$('import-file').click();return}
   };
   function renderAdviceGroup(label,items){return Array.isArray(items)&&items.length?'<div class="small" style="margin-top:7px"><b>'+esc(label)+'</b><ul>'+items.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>':''}
   function dayFingerprint(date){const m=meals.filter(x=>x.date===date);return JSON.stringify(m.map(x=>[x.id,x.items?.map(i=>[i.id,i.k,i.p,i.f,i.c])]))}
-  // MP_V3_EXTENSION_POINT
+  (function installAIandPersistence(){
+  const baseAiText=aiText,baseAiCard=renderAiCard,baseExportAll=exportAll,baseImportAll=importAll;
+  const isMissing=(x,k)=>x[k]===undefined||x[k]===null||!Number.isFinite(Number(x[k]));
+  const hashText=s=>{let h=2166136261;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)}return(h>>>0).toString(36)};
+  const dateOk=s=>typeof s==='string'&&/^\d{4}-\d{2}-\d{2}$/.test(s)&&!isNaN(new Date(s+'T12:00:00').getTime());
+  const norm=(s)=>String(s||'').replace(/[\s　]+/g,'').toLowerCase();
+  const safeNum=(value,key)=>{
+    if(value===null||value===undefined||value==='')return null;
+    if(typeof value!=='number'||!Number.isFinite(value))throw new Error('栄養値は数値またはnullにしてください：'+key);
+    const max=key==='k'?10000:2000;
+    if(value<0||value>max)throw new Error('栄養値の範囲を確認してください：'+key);
+    return round1(value);
+  };
+  aiText=function(days=aiRange){
+    const original=baseAiText(days);
+    const end=new Date(day+'T12:00:00'),start=new Date(end);start.setDate(end.getDate()-days+1);
+    const from=keyOf(start),period=meals.filter(m=>m.date>=from&&m.date<=day);
+    const unknownCount=period.reduce((n,m)=>n+m.items.filter(x=>['k','p','f','c'].some(k=>isMissing(x,k))).length,0);
+    const visible=aiScope==='unknown'?period.filter(m=>m.items.some(x=>['k','p','f','c'].some(k=>isMissing(x,k)))):period;
+    const info=visible.map(m=>({
+      date:m.date,mealType:m.type,mealId:m.id,note:m.note||'',
+      items:m.items.filter(x=>aiScope!=='unknown'||['k','p','f','c'].some(k=>isMissing(x,k))).map(x=>({
+        itemId:x.id,name:x.name,amount:x.amount??null,k:x.k??null,p:x.p??null,f:x.f??null,c:x.c??null
+      }))
+    })).filter(m=>m.items.length);
+    let suffix='\n\n【MEAL PARTNER v3：AI補完とアドバイス保存】\n';
+    suffix+='この相談では、分かる範囲の栄養評価に加え、アプリに取り込むJSONを出力してください。\n';
+    suffix+='以下はアプリ内の食品IDです。このIDは必ずそのまま使用し、食品名や日付も一致させてください。元データと関係ない食品や架空の食事は加えないでください。\n';
+    suffix+='AI補完対象：'+(aiScope==='unknown'?'未計算の食品のみ':aiScope==='week'?'直近7日間の記録':'選択期間のすべての記録')+'。未計算の食品：'+unknownCount+'品（PFCの一部だけ未計算の場合も含む）。\n';
+    suffix+='【照合用データ】\n'+JSON.stringify(info,null,2)+'\n';
+    suffix+='【JSON出力の形式】\n';
+    suffix+='必ず回答の最後に、以下の形式でJSONコードブロックを1つ付けてください。形式名は正確に meal-partner-ai-v1 としてください。\n';
+    suffix+='```json\n'+JSON.stringify({
+      format:'meal-partner-ai-v1',
+      items:[{date:day,mealId:'上記の正確なmealId',itemId:'上記の正確なitemId',name:'元の食品名と完全一致',k:120,p:1.2,f:0.1,c:28.1,basis:'estimate',note:'100gあたりの根拠や、未確認の調理法など'}],
+      advice:[{date:day,summary:'全体の短い評価',good:['良かった点'],improve:['改善点'],next:['次の具体的な食事提案']}]
+    },null,2)+'\n```\n';
+    suffix+='JSONは実際の対象食品だけで作成してください。例示の架空IDは絶対に使わないでください。未計算品がなければ items:[] で構いません。\n';
+    suffix+='食品のkはその食事で食べた分のkcal、p/f/cは同じ食事分のgとし、100gあたりの値をそのまま入れないでください。測定値・標準食品成分・メーカー表示・概算を混同しないでください。\n';
+    suffix+='basis は estimate（概算）、standard（食品成分表参考）、label（確認できた商品表示）のいずれか。確認できない値はnullにし、推測だけでゼロにしないでください。\n';
+    suffix+='お肉は購入時の加熱前重量。芋やきのこも量の条件を参考にして調理状態を区別。骨や皮、油、たれの不明点はnoteに記してください。\n';
+    suffix+='既に計算済みの値はアプリ側が上書きしないので、必要なら本人に修正方法を説明してください。\n';
+    suffix+='advice は食事記録がある日付について作成してください。できるだけ分かりやすく、厳しい制限や減量を急がせる表現を避けてください。JSONの前に通常の日本語コメントを付けても大丈夫です。\n';
+    return original+suffix;
+  };
+  renderAiCard=function(){
+    const old=baseAiCard();
+    const extra='<div class="card"><div class="card-title">🧠 AI補完・アドバイス保存</div>'+
+      '<p class="small muted">相談文には食品の識別番号も付くよ。ChatGPTの返答にあるJSON部分をこの下に貼り付けると、未計算の食品と日別アドバイスを自動保存！</p>'+
+      '<div class="chips">'+[['unknown','🔎 未計算だけ'],['day','🍱 その日の記録'],['week','📆 直近7日']].map(([k,t])=>'<button class="chip '+(aiScope===k?'chosen':'')+'" data-action="ai-scope" data-scope="'+k+'">'+t+'</button>').join('')+'</div>'+
+      '<p class="caption">まず上の「プロンプトをコピー」でChatGPTに相談し、返答に含まれるJSONを貼り付けてね。写真は送信されないよ。</p>'+
+      '<label class="label" for="ai-json">ChatGPTの補完JSONを貼り付け</label>'+
+      '<textarea id="ai-json" rows="6" placeholder="```json&#10;{ &quot;format&quot;: &quot;meal-partner-ai-v1&quot;, ... }&#10;```"></textarea>'+
+      '<button class="primary wide" data-action="ai-import">✨ 貼り付けた結果を自動反映</button>'+
+      (aiImports.length?'<div class="stack" style="margin-top:12px"><span class="small muted">直近の補完：'+esc(aiImports[aiImports.length-1].created?.slice(0,16).replace('T',' ')||'')+'</span><button class="ghost small" data-action="ai-undo">↩ 直前のAI補完を取り消す</button></div>':'')+
+      '<p class="caption">誤ったID・形式・異常な数値は反映しない。補完後も必要なら数値を見直してね。既存の栄養値は原則上書きしないよ。</p></div>';
+    return old+extra;
+  };
+  function extractJson(textValue){
+    const raw=String(textValue||'').trim();
+    if(!raw||raw.length>240000)throw new Error('JSONが空か、長すぎます');
+    const chunks=[raw];
+    for(const m of raw.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi))chunks.unshift(m[1].trim());
+    for(const t of chunks){try{const p=JSON.parse(t);if(p?.format==='meal-partner-ai-v1')return p}catch(_){}}
+    throw new Error('MEAL PARTNER用JSONが見つかりません。ChatGPTの返信にある ```json ... ``` の部分を貼り付けてね。');
+  }
+  function cleanWords(words,maxCount=6){
+    if(!Array.isArray(words))return [];
+    return words.slice(0,maxCount).filter(x=>typeof x==='string').map(x=>x.trim().slice(0,400)).filter(Boolean);
+  }
+  function parseIncoming(payload){
+    if(payload.format!=='meal-partner-ai-v1'||!Array.isArray(payload.items)||!Array.isArray(payload.advice))throw new Error('指定したJSON形式ではありません');
+    if(payload.items.length>250||payload.advice.length>31)throw new Error('取り込みデータが多すぎます');
+    return payload;
+  }
+  function getImportPlan(payload){
+    parseIncoming(payload);
+    const importId='ai:'+hashText(JSON.stringify(payload));
+    if(aiImports.some(x=>x.id===importId))return {duplicate:true,id:importId};
+    const changedMeals=new Map(),dictChanges=[],noteChanges=[],patches=[];
+    const visited=new Set();
+    for(const x of payload.items){
+      const date=String(x.date||''),mealId=String(x.mealId||''),itemId=String(x.itemId||'');
+      if(!dateOk(date))throw new Error('食品の日付が不正です');
+      const m=meals.find(y=>y.id===mealId&&y.date===date);
+      if(!m)throw new Error('対象の食事が見つかりません（'+date+'）。日付または食事が変更された可能性があります');
+      const oldItem=m.items.find(y=>y.id===itemId);
+      if(!oldItem||norm(oldItem.name)!==norm(x.name))throw new Error('対象の食品ID・名前が一致しません：'+String(x.name||'不明'));
+      if(visited.has(mealId+'/'+itemId))throw new Error('同じ食品がJSON内に重複しています');
+      visited.add(mealId+'/'+itemId);
+      const vals={};for(const k of ['k','p','f','c'])vals[k]=safeNum(x[k],k);
+      let newItem={...(changedMeals.get(mealId)||m).items.find(y=>y.id===itemId)};
+      const before={};let changed=false;
+      for(const k of ['k','p','f','c']){
+        if(isMissing(newItem,k)&&vals[k]!==null){before[k]=newItem[k]??null;newItem[k]=vals[k];changed=true;}
+      }
+      if(!changed)continue;
+      const basis=['standard','label','estimate'].includes(x.basis)?x.basis:'estimate';
+      const orig=oldItem.aiMeta??null,origSource=oldItem.source??null;
+      newItem.aiMeta={importId,basis,note:typeof x.note==='string'?x.note.slice(0,250):'',at:new Date().toISOString()};
+      newItem.source='ai-'+basis;
+      patches.push({mealId,itemId,before,originalMeta:orig,originalSource:origSource,after:Object.fromEntries(Object.keys(before).map(k=>[k,newItem[k]]))});
+      const rebuilt=changedMeals.get(mealId)||{...m,items:m.items.map(z=>({...z}))};
+      rebuilt.items=rebuilt.items.map(z=>z.id===itemId?newItem:z);
+      changedMeals.set(mealId,rebuilt);
+      const qty=Number(oldItem.amount);
+      const unit=Number.isFinite(qty)&&qty>0?'per100g':'serving';
+      const ratio=unit==='per100g'?100/qty:1;
+      const actual=Object.fromEntries(['k','p','f','c'].map(k=>[k,newItem[k]==null?null:round1(newItem[k]*ratio)]));
+      const dictId='dict:'+hashText(norm(oldItem.name)+'|'+unit+'|'+JSON.stringify(actual)+'|'+basis);
+      if(!userFoods.some(z=>z.id===dictId)&&!dictChanges.some(z=>z.id===dictId)){
+        dictChanges.push({id:dictId,name:oldItem.name,unit,defaultGrams:unit==='per100g'?Math.round(qty):1,
+          ...actual,source:basis==='label'?'メーカー表示':basis==='standard'?'食品成分参考':'AIによる推定',
+          note:typeof x.note==='string'?x.note.slice(0,280):'',sourceImport:importId,created:new Date().toISOString()});
+      }
+    }
+    const anticipated=meals.map(m=>changedMeals.get(m.id)||m);
+    function snapshot(date){
+      return JSON.stringify(anticipated.filter(m=>m.date===date).map(m=>[m.id,m.items?.map(x=>[x.id,x.k,x.p,x.f,x.c])]));
+    }
+    for(let i=0;i<payload.advice.length;i++){
+      const x=payload.advice[i],date=String(x.date||'');
+      if(!dateOk(date)||!meals.some(m=>m.date===date))throw new Error('AIアドバイスの日付に食事記録がありません：'+date);
+      const s=typeof x.summary==='string'?x.summary.trim().slice(0,900):'';
+      const good=cleanWords(x.good),improve=cleanWords(x.improve),next=cleanWords(x.next);
+      if(!s&&!good.length&&!improve.length&&!next.length)continue;
+      const newId=importId+':advice:'+date+':'+i;
+      noteChanges.push({id:newId,date,summary:s,good,improve,next,created:new Date().toISOString(),importId,snapshot:snapshot(date)});
+    }
+    return {id:importId,changedMeals,dictChanges,noteChanges,patches,duplicate:false};
+  }
+  function commitTransaction(stores,fn){
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction(stores,'readwrite');let done=false;
+      tx.oncomplete=()=>{done=true;resolve()};
+      tx.onerror=()=>{if(!done)reject(tx.error||new Error('保存エラー'))};
+      tx.onabort=()=>{if(!done)reject(tx.error||new Error('保存が中断されました'))};
+      try{fn(tx)}catch(err){tx.abort();reject(err)}
+    });
+  }
+  async function importAi(raw){
+    const incoming=extractJson(raw),plan=getImportPlan(incoming);
+    if(plan.duplicate){toast('同じ補完データは反映済みだよ ✓');return}
+    if(!plan.patches.length&&!plan.noteChanges.length)throw new Error('更新できる食品・アドバイスがありません（すでに計算済みの場合があります）');
+    const log={id:plan.id,created:new Date().toISOString(),patches:plan.patches,dictIds:plan.dictChanges.map(x=>x.id),noteIds:plan.noteChanges.map(x=>x.id)};
+    await commitTransaction(['meals','userFoods','aiNotes','aiImports'],tx=>{
+      for(const m of plan.changedMeals.values())tx.objectStore('meals').put(m);
+      for(const f of plan.dictChanges)tx.objectStore('userFoods').put(f);
+      for(const n of plan.noteChanges)tx.objectStore('aiNotes').put(n);
+      tx.objectStore('aiImports').put(log);
+    });
+    await refresh();render();
+    toast('補完'+plan.patches.length+'品・アドバイス'+plan.noteChanges.length+'件を保存したよ ✨');
+  }
+  async function undoLatestAi(){
+    const log=aiImports[aiImports.length-1];if(!log){toast('取り消せる補完がないよ');return}
+    if(!confirm('直前のAI補完を取り消しますか？後から編集した食品値は上書きせず残します。'))return;
+    const changed=new Map();
+    for(const p of log.patches){
+      const m=meals.find(x=>x.id===p.mealId);if(!m)continue;
+      const entry=(changed.get(m.id)||m).items.find(x=>x.id===p.itemId);
+      if(!entry||entry.aiMeta?.importId!==log.id)continue;
+      if(!Object.entries(p.after).every(([k,v])=>entry[k]===v))continue;
+      const restore={...entry};
+      for(const [k,v] of Object.entries(p.before))restore[k]=v;
+      if(p.originalMeta)restore.aiMeta=p.originalMeta;else delete restore.aiMeta;
+      if(p.originalSource!==null)restore.source=p.originalSource;else delete restore.source;
+      const updated=changed.get(m.id)||{...m,items:m.items.map(x=>({...x}))};
+      updated.items=updated.items.map(x=>x.id===p.itemId?restore:x);
+      changed.set(m.id,updated);
+    }
+    await commitTransaction(['meals','userFoods','aiNotes','aiImports'],tx=>{
+      for(const m of changed.values())tx.objectStore('meals').put(m);
+      for(const did of log.dictIds){const f=userFoods.find(x=>x.id===did);if(f?.sourceImport===log.id&&!f.userEdited)tx.objectStore('userFoods').delete(did)}
+      for(const nid of log.noteIds)tx.objectStore('aiNotes').delete(nid);
+      tx.objectStore('aiImports').delete(log.id);
+    });
+    await refresh();render();toast('直前の補完を取り消したよ ↩');
+  }
+  const numberToSave=(id,k)=>{
+    const v=$(id)?.value?.trim();
+    if(v==='')return null;
+    return safeNum(Number(v),k);
+  };
+  document.addEventListener('click',async e=>{
+    const btn=e.target.closest('[data-action]');if(!btn)return;
+    const act=btn.dataset.action;
+    if(act==='select-food'){selectedUserFood=null;return}
+    const handled=['ai-scope','ai-import','ai-undo','pick-dict-food','add-search','dict-edit','dict-save','dict-delete'];
+    if(!handled.includes(act))return;
+    if(act==='add-search'&&!selectedUserFood)return;
+    e.preventDefault();e.stopImmediatePropagation();
+    try{
+      if(act==='ai-scope'){aiScope=btn.dataset.scope;aiRange=aiScope==='week'?7:1;render();return}
+      if(act==='ai-import'){
+        const raw=$('ai-json')?.value||'';
+        if(!raw.trim()){toast('ChatGPTのJSONを貼り付けてね');return}
+        btn.disabled=true;
+        try{await importAi(raw)}finally{btn.disabled=false}
+        return;
+      }
+      if(act==='ai-undo'){await undoLatestAi();return}
+      if(act==='pick-dict-food'){
+        selectedUserFood=btn.dataset.id;
+        const f=userFoods.find(x=>x.id===selectedUserFood);
+        const grams=$('food-grams');if(grams&&f)grams.value=f.unit==='serving'?1:f.defaultGrams||100;
+        renderSearchResults();updateSearchPreview();return;
+      }
+      if(act==='add-search'){
+        const f=userFoods.find(x=>x.id===selectedUserFood),qty=validNumber($('food-grams')?.value);
+        if(!f||!qty||qty>3000){toast('食品の量を入力してね');return}
+        const ratio=f.unit==='serving'?qty:qty/100;
+        const vals=Object.fromEntries(['k','p','f','c'].map(k=>[k,f[k]==null?null:round1(f[k]*ratio)]));
+        draft.push({id:id(),name:f.name,amount:f.unit==='serving'?null:qty,servings:f.unit==='serving'?qty:null,
+          ...vals,source:'dictionary',dictionaryId:f.id});
+        render();toast('マイ食品辞典から追加したよ 📚');return;
+      }
+      if(act==='dict-edit'){editingUserFood=btn.dataset.id;render();return}
+      if(act==='dict-save'){
+        const f=userFoods.find(x=>x.id===btn.dataset.id);if(!f)throw new Error('食品が見つかりません');
+        const values=Object.fromEntries(['k','p','f','c'].map(k=>[k,numberToSave('dict-'+k,k)]));
+        await storeOp('userFoods','put',{...f,...values,userEdited:true,updated:new Date().toISOString()});
+        editingUserFood=null;await refresh();render();toast('マイ食品辞典を修正したよ ✓');return;
+      }
+      if(act==='dict-delete'){
+        const f=userFoods.find(x=>x.id===btn.dataset.id);if(!f)return;
+        if(!confirm('食品辞典から削除しますか？過去の食事記録は消えません。'))return;
+        await storeOp('userFoods','delete',f.id);editingUserFood=null;selectedUserFood=null;
+        await refresh();render();toast('食品辞典から削除したよ');return;
+      }
+    }catch(err){console.error(err);toast('取り込みできませんでした：'+(err.message||'不明なエラー'))}
+  },true);
+  // JSON backups include all new stores; older version 1 files remain restorable.
+  exportAll=async function(){
+    toast('バックアップを準備中...');
+    const originals=[];
+    for(const m of meals)originals.push({...m,photo:m.photo?await blobDataUrl(m.photo):null});
+    const b={type:'meal-partner-backup',version:2,exportedAt:new Date().toISOString(),
+      meals:originals,favorites:favs,weights,settings,userFoods,aiNotes,aiImports};
+    const anchor=document.createElement('a');
+    const url=URL.createObjectURL(new Blob([JSON.stringify(b,null,2)],{type:'application/json'}));
+    anchor.href=url;anchor.download='meal-partner-backup-'+today()+'.json';document.body.appendChild(anchor);anchor.click();anchor.remove();
+    setTimeout(()=>URL.revokeObjectURL(url),2000);toast('すべての記録のバックアップを作成したよ 💾');
+  };
+  importAll=async function(file){
+    if(!file)return;
+    try{
+      if(file.size>100*1024*1024)throw new Error('バックアップが大きすぎます');
+      const b=JSON.parse(await file.text());
+      if(b.version===1){await baseImportAll(file);return}
+      if(b.type!=='meal-partner-backup'||b.version!==2||!Array.isArray(b.meals)||!Array.isArray(b.favorites)||!Array.isArray(b.weights)||!b.settings||
+      !Array.isArray(b.userFoods)||!Array.isArray(b.aiNotes)||!Array.isArray(b.aiImports))throw new Error('MEAL PARTNER用のバックアップではありません');
+      if(!confirm('バックアップの内容を復元します。同じIDのデータは上書きされます。続けますか？'))return;
+      const restoreMeals=b.meals.filter(m=>m&&typeof m.id==='string'&&dateOk(m.date)&&Array.isArray(m.items))
+      .map(m=>({...m,photo:typeof m.photo==='string'?dataURLBlob(m.photo):null}));
+      await commitTransaction(['meals','favorites','weights','settings','userFoods','aiNotes','aiImports'],tx=>{
+        for(const m of restoreMeals)tx.objectStore('meals').put(m);
+        for(const f of b.favorites)if(f?.id&&f.name)tx.objectStore('favorites').put(f);
+        for(const w of b.weights)if(w?.id&&Number.isFinite(+w.value))tx.objectStore('weights').put(w);
+        if(b.settings.id==='prefs'&&MODES[b.settings.mode])tx.objectStore('settings').put(b.settings);
+        for(const x of b.userFoods)if(x?.id&&x.name)tx.objectStore('userFoods').put(x);
+        for(const x of b.aiNotes)if(x?.id&&dateOk(x.date))tx.objectStore('aiNotes').put(x);
+        for(const x of b.aiImports)if(x?.id&&Array.isArray(x.patches))tx.objectStore('aiImports').put(x);
+      });
+      await refresh();render();toast('新しい形式のバックアップを復元したよ ✓');
+    }catch(err){console.error(err);toast('復元できませんでした：'+(err.message||err))}
+  };
+  const oldSettingsAfter=renderSettings;
+  renderSettings=function(){
+    return oldSettingsAfter().replace('初期版はこの端末のブラウザだけに記録を保存します。','食事・写真・体重・AIアドバイス・マイ食品辞典をすべて保存できます。同期機能はまだないので、定期的にバックアップしてね。');
+  };
+})();
+// MP_V3_EXTENSION_POINT
 })();
 document.addEventListener('click',handleClick);
 document.addEventListener('input',e=>{if(e.target.id==='meal-note'){addMealNote=e.target.value;return}if(e.target.id==='food-query'){searchText=e.target.value;renderSearchResults();updateSearchPreview();return}if(e.target.id==='food-grams'){updateSearchPreview();return}});
