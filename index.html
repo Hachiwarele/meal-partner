@@ -380,6 +380,181 @@ if(a==='import-trigger'){$('import-file').click();return}
     }
   },true);
 })();
+/* MEAL PARTNER v3 safe incremental upgrade */
+(function MEAL_PARTNER_V3(){
+  // Migration adds stores only. Existing meal/weight/favorite/photo records are never deleted or rewritten.
+  dbOpen=function(){
+    return new Promise((resolve,reject)=>{
+      const req=indexedDB.open('meal-partner-local',2);
+      req.onupgradeneeded=()=>{
+        const d=req.result;
+        for(const s of ['meals','favorites','weights','settings','userFoods','aiNotes','aiImports'])
+          if(!d.objectStoreNames.contains(s))d.createObjectStore(s,{keyPath:'id'});
+      };
+      req.onsuccess=()=>{req.result.onversionchange=()=>req.result.close();resolve(req.result)};
+      req.onerror=()=>reject(req.error);
+      req.onblocked=()=>reject(new Error('ほかのタブでMEAL PARTNERを開いている場合は、そのタブを閉じて再読み込みしてください。'));
+    });
+  };
+  let userFoods=[],aiNotes=[],aiImports=[],selectedUserFood=null,editingUserFood=null,aiScope='unknown';
+  const previousRefresh=refresh;
+  refresh=async function(){
+    await previousRefresh();
+    [userFoods,aiNotes,aiImports]=await Promise.all(['userFoods','aiNotes','aiImports'].map(s=>storeOp(s,'all')));
+    aiNotes.sort((a,b)=>(b.created||'').localeCompare(a.created||''));
+  };
+  const MORE=[
+    ['さつまいも（皮なし・生）',126,1.2,.2,31.9,'いも類',190],
+    ['さつまいも（皮つき・生）',127,1.2,.2,32,'いも類',190],
+    ['じゃがいも（皮なし・生）',59,1.8,.1,17,'いも類',150],
+    ['じゃがいも（ゆで）',65,1.7,.1,15.5,'いも類',150],
+    ['里芋（生）',53,1.5,.1,13.1,'いも類',150],
+    ['長芋（生）',64,2.2,.3,13.9,'いも類',100],
+    ['かぼちゃ（日本・生）',41,1.6,.1,10.9,'野菜',100],
+    ['かぼちゃ（西洋・生）',78,1.9,.3,20.6,'野菜',100],
+    ['もやし（生）',15,1.7,.1,2.6,'野菜',150],
+    ['小松菜（生）',13,1.5,.2,2.4,'野菜',100],
+    ['小松菜（ゆで）',14,1.6,.1,3,'野菜',100],
+    ['ブロッコリー（生）',37,5.4,.6,6.6,'野菜',100],
+    ['ほうれん草（生）',18,2.2,.4,3.1,'野菜',100],
+    ['白菜（生）',13,.8,.1,3.2,'野菜',150],
+    ['玉ねぎ（生）',33,1,.1,8.4,'野菜',100],
+    ['長ねぎ（生）',35,1.4,.1,8.3,'野菜',50],
+    ['ピーマン（生）',20,.9,.2,5.1,'野菜',50],
+    ['パプリカ（赤・生）',28,1,.2,7.2,'野菜',80],
+    ['なす（生）',18,1.1,.1,5.1,'野菜',100],
+    ['大根（生）',15,.4,.1,4.1,'野菜',100],
+    ['大根おろし',18,.5,.1,4.1,'野菜',50],
+    ['アスパラガス（生）',21,2.6,.2,3.9,'野菜',100],
+    ['オクラ（生）',26,2.1,.2,6.6,'野菜',50],
+    ['ごぼう（生）',58,1.8,.1,15.4,'野菜',100],
+    ['れんこん（生）',66,1.9,.1,15.5,'野菜',100],
+    ['ズッキーニ（生）',16,1.3,.1,2.8,'野菜',100],
+    ['にら（生）',18,1.7,.3,4,'野菜',50],
+    ['きゃべつ（ゆで）',19,1.1,.1,4.6,'野菜',150],
+    ['しいたけ（生・菌床）',25,3.1,.3,6.4,'きのこ',40],
+    ['しいたけ（干し）',258,19.3,3.7,62.5,'きのこ',10],
+    ['まいたけ（生）',22,2,.5,4.4,'きのこ',35],
+    ['ぶなしめじ（生）',26,2.7,.5,4.8,'きのこ',100],
+    ['えのきたけ（ゆで）',34,2.3,.2,7.9,'きのこ',100],
+    ['エリンギ（生）',31,2.8,.4,6,'きのこ',100],
+    ['なめこ（生）',15,1.7,.2,3.2,'きのこ',100],
+    ['マッシュルーム（生）',15,2.9,.3,2.1,'きのこ',80],
+    ['まつたけ（生）',32,2,.6,8.2,'きのこ',50],
+    ['もずく（味付けなし）',4,.2,.1,1.4,'海藻',70],
+    ['もずく酢（市販品・目安）',38,.2,.1,8.9,'海藻',70],
+    ['めかぶ（生）',11,.9,.6,3.4,'海藻',50],
+    ['わかめ（乾燥）',172,13.6,1.6,41.3,'海藻',3],
+    ['ひじき（ゆで）',11,.7,.3,3.4,'海藻',50],
+    ['昆布（だし用・乾燥）',170,8.3,1.2,56,'海藻',3],
+    ['絹ごし豆腐',56,5.3,3.5,2,'豆・卵',150],
+    ['厚揚げ',143,10.7,11.3,1.2,'豆・卵',100],
+    ['油揚げ',377,23.4,34.4,.4,'豆・卵',30],
+    ['枝豆（ゆで）',118,11.5,6.1,8.9,'豆・卵',80],
+    ['ごま油',890,0,100,0,'調味料',8],
+    ['サラダ油',886,0,100,0,'調味料',8],
+    ['バター（有塩）',700,.6,81,0,'調味料',10],
+    ['焼肉のたれ（市販・目安）',170,3,1,39,'調味料',20],
+    ['ごまだれ（市販・目安）',280,4,20,20,'調味料',15],
+    ['ポン酢しょうゆ',60,3,0,12,'調味料',15],
+    ['しょうゆ（濃口）',76,7.7,0,7.9,'調味料',10],
+    ['みそ（米みそ・淡色辛みそ）',182,12.5,6,21.9,'調味料',18],
+    ['塩',0,0,0,0,'調味料',1],
+    ['みりん（本みりん）',241,.3,0,43.2,'調味料',15],
+    ['料理酒（加塩・目安）',100,.3,0,5,'調味料',15],
+    ['はちみつ',329,.3,0,81.9,'調味料',15],
+    ['キウイフルーツ（生）',51,1,.2,13.5,'果物',90],
+    ['グレープフルーツ（生）',40,.9,.1,9.6,'果物',150],
+    ['アボカド（生）',176,2.1,17.5,7.9,'果物',100],
+    ['みかん（缶詰）',63,.5,.1,15.5,'果物',100],
+    ['お〜いお茶 濃い茶（無糖・目安）',0,0,0,0,'お茶・飲料',500],
+    ['緑茶（ペットボトル・無糖）',0,0,0,0,'お茶・飲料',500],
+    ['ほうじ茶（ペットボトル・無糖）',0,0,0,0,'お茶・飲料',500],
+    ['麦茶（ペットボトル・無糖）',0,0,0,0,'お茶・飲料',500],
+    ['おにぎり（たまご・1個目安110g）',200,6,5,34,'おにぎり',110],
+    ['おにぎり（牛焼肉・1個目安120g）',240,6,7,38,'おにぎり',120],
+    ['おにぎり（鶏五目・1個目安110g）',185,5,2.5,37,'おにぎり',110],
+    ['おにぎり（塩むすび・1個目安100g）',171,2.7,.5,38,'おにぎり',100],
+    ['惣菜パン（一般・目安）',280,7,11,39,'パン・惣菜',130],
+    ['チョコパン（1個目安100g）',330,6,13,48,'パン・惣菜',100],
+    ['ミニクロワッサン（1個目安25g）',406,7.9,26.8,43.9,'パン・惣菜',25],
+    ['食パン（6枚切り1枚目安60g）',248,8.9,4.1,46.4,'パン・惣菜',60],
+    ['シュガードーナツ（1個目安70g）',385,5,22,43,'パン・惣菜',70],
+    ['プレーンヨーグルト（無糖）',56,3.6,3,4.9,'乳製品',100],
+    ['低脂肪乳',42,3.8,1,5.5,'乳製品',200],
+    ['プレーンプロテインドリンク（目安）',60,10,.8,3,'お茶・飲料',200]
+  ];
+  for(const a of MORE){
+    if(FOODS.some(f=>f.name===a[0]))continue;
+    FOODS.push({id:FOODS.length,name:a[0],k:a[1],p:a[2],f:a[3],c:a[4],group:a[5],defaultGrams:a[6],source:'estimate',note:'一般的な概算値。商品・品種・調理状態で変わります。'});
+  }
+  const baseSearch=renderSearchResults,basePreview=updateSearchPreview;
+  const normalizeName=s=>String(s||'').trim().replace(/[\s　]+/g,' ').toLowerCase();
+  renderSearchResults=function(){
+    baseSearch();
+    const root=$('search-results');if(!root)return;
+    const query=normalizeName(searchText).replace(/\s/g,'');
+    const hits=userFoods.filter(f=>normalizeName(f.name).replace(/\s/g,'').includes(query)).slice(0,20);
+    if(selectedUserFood&&!hits.some(x=>x.id===selectedUserFood))selectedUserFood=null;
+    if(hits.length){
+      root.innerHTML+='<div class="tiny muted" style="margin:12px 0 4px">📚 マイ食品辞典</div>'+
+        hits.map(f=>'<button class="suggestion '+(selectedUserFood===f.id?'active':'')+'" data-action="pick-dict-food" data-id="'+esc(f.id)+'"><span><strong>'+esc(f.name)+'</strong><br><small>'+esc(f.unit==='serving'?'登録した1食分':'100gあたり')+'・'+esc(f.source||'AI推定')+'</small></span><small>'+((typeof f.k==='number')?nf(f.k)+' kcal':'要確認')+'</small></button>').join('');
+    }
+    const el=$('food-extra-note');if(el&&selectedUserFood){const f=userFoods.find(x=>x.id===selectedUserFood);if(f)el.textContent=f.unit==='serving'?'マイ食品：食べた量の欄は「何食分か」で入力してね。':'マイ食品：100gあたりの栄養値で計算。'}
+  };
+  updateSearchPreview=function(){
+    if(!selectedUserFood)return basePreview();
+    const root=$('search-preview'),f=userFoods.find(x=>x.id===selectedUserFood),qty=validNumber($('food-grams')?.value);
+    if(!root||!f)return;
+    if(!qty||qty>3000){root.innerHTML='<div class="notice">量を入力してね</div>';return}
+    const ratio=f.unit==='serving'?qty:qty/100;
+    const show=(key,d=1)=>f[key]==null?'未計算':nf(f[key]*ratio,d);
+    root.innerHTML='<div class="preview"><div class="small">'+esc(f.name)+'・'+nf(qty)+(f.unit==='serving'?'食分':'g')+'</div>'+
+      '<strong>'+show('k',0)+' <span class="small">kcal</span></strong><div class="small muted">P '+show('p')+'g F '+show('f')+'g C '+show('c')+'g</div><div class="caption">'+esc(f.source||'推定値')+'：'+esc(f.note||'')+'</div></div>';
+  };
+  const previousSettings=renderSettings;
+  renderSettings=function(){
+    const section='<div class="section-title"><h2>📚 マイ食品辞典（'+userFoods.length+'品）</h2></div><div class="card">'+
+      '<p class="small muted">AIが補完した食品はすべてここへ自動登録。推定値や商品差を確認・修正できるよ。過去の食事記録は変更されないよ。</p>'+
+      (userFoods.length?userFoods.slice(0,80).map(f=>'<div class="item stack"><div><div class="item-name">'+esc(f.name)+'</div><div class="item-desc">'+
+        (f.k==null?'栄養値要確認':nf(f.k)+'kcal')+' / '+(f.unit==='serving'?'登録した1食分':'100g')+' · '+esc(f.source||'AI推定')+
+      '</div></div><div class="btn-row"><button class="ghost small" data-action="dict-edit" data-id="'+esc(f.id)+'">編集</button><button class="item-btn danger" data-action="dict-delete" data-id="'+esc(f.id)+'">×</button></div></div>').join(''):'<div class="empty">AI補完をすると、食品がここに自動登録されるよ。</div>')+
+      (editingUserFood?renderDictEditor(userFoods.find(x=>x.id===editingUserFood)):'')+
+      '</div>';
+    return previousSettings()+section;
+  };
+  function renderDictEditor(f){
+    if(!f)return '';
+    return '<div class="notice" style="margin-top:10px"><strong>✏️ '+esc(f.name)+'</strong><p class="caption">栄養値は'+(f.unit==='serving'?'登録した1食分':'100g')+'あたり。分からない場合は空欄で保存。</p>'+
+      '<div class="two">'+[['k','カロリー'],['p','たんぱく質'],['f','脂質'],['c','炭水化物']].map(([k,n])=>
+      '<div class="field"><label class="label" for="dict-'+k+'">'+n+'</label><input id="dict-'+k+'" type="number" min="0" max="5000" step="0.1" value="'+(f[k]==null?'':f[k])+'"></div>').join('')+'</div>'+
+      '<button class="secondary wide" data-action="dict-save" data-id="'+esc(f.id)+'">変更を保存</button></div>';
+  }
+  const priorHistory=renderHistory;
+  renderHistory=function(){
+    const allDates=[...new Set([...meals.map(x=>x.date),...aiNotes.map(x=>x.date)])].sort().reverse();
+    const dd=meals.filter(m=>m.date===historyDay);
+    const notes=aiNotes.filter(x=>x.date===historyDay);
+    const total=sums(dd.flatMap(x=>x.items));
+    const dailyList=allDates.map(date=>{
+      const ms=meals.filter(m=>m.date===date),a=aiNotes.some(x=>x.date===date),s=sums(ms.flatMap(x=>x.items));
+      return '<button class="day-history-entry" data-action="jump-day" data-date="'+esc(date)+'"><span><strong>📅 '+esc(dateLabel(date))+'</strong><small class="muted"> '+ms.length+'件の食事'+(a?'・AIアドバイスあり':'')+'</small></span><strong>'+valueText(s,'k','kcal')+' ›</strong></button>';
+    }).join('');
+    return '<h1 class="greet">📅 日別の食事履歴</h1><p class="sub">食事の記録はそのままに、1日ごとにまとめて見られるよ。</p>'+
+      '<div class="card"><label class="label" for="history-date">表示する日付</label><input id="history-date" type="date" value="'+esc(historyDay)+'"><div class="small muted" style="margin-top:12px">'+dateLabel(historyDay)+' · '+dd.length+'件 / '+valueText(total,'k','kcal')+'</div></div>'+
+      (dd.length?dd.map(renderMealCard).join(''):'<div class="card empty">この日の食事はまだ記録されていません。</div>')+
+      '<div class="section-title"><h2>✨ この日のAIアドバイス</h2></div>'+
+      (notes.length?notes.map((n,i)=>'<div class="card"><div class="stack"><span class="tag">'+(i===0?'最新':'過去の分析')+'</span><span class="tiny muted">'+esc((n.created||'').slice(0,16).replace('T',' '))+'</span></div><p class="small">'+esc(n.summary||'')+'</p>'+
+        renderAdviceGroup('良かった点',n.good)+renderAdviceGroup('改善したい点',n.improve)+renderAdviceGroup('次の提案',n.next)+
+        '<div class="tiny muted">'+(n.snapshot===dayFingerprint(historyDay)?'現在の食事記録に基づく分析':'⚠️ 保存後に食事内容が変わっている可能性があります')+'</div></div>').join(''):'<div class="card empty">AIの補完結果を貼り付けると、アドバイスも保存されるよ。</div>')+
+      '<div class="section-title"><h2>📆 すべての日付</h2><span class="tiny muted">'+allDates.length+'日</span></div>'+
+      '<div class="card">'+(dailyList||'<div class="empty">まだ履歴がありません</div>')+'</div>'+
+      '<div class="notice">食事・写真・お気に入り・体重の保存データは削除していません。設定からバックアップを作成できるよ。</div>';
+  };
+  function renderAdviceGroup(label,items){return Array.isArray(items)&&items.length?'<div class="small" style="margin-top:7px"><b>'+esc(label)+'</b><ul>'+items.map(x=>'<li>'+esc(x)+'</li>').join('')+'</ul></div>':''}
+  function dayFingerprint(date){const m=meals.filter(x=>x.date===date);return JSON.stringify(m.map(x=>[x.id,x.items?.map(i=>[i.id,i.k,i.p,i.f,i.c])]))}
+  // MP_V3_EXTENSION_POINT
+})();
 document.addEventListener('click',handleClick);
 document.addEventListener('input',e=>{if(e.target.id==='meal-note'){addMealNote=e.target.value;return}if(e.target.id==='food-query'){searchText=e.target.value;renderSearchResults();updateSearchPreview();return}if(e.target.id==='food-grams'){updateSearchPreview();return}});
 document.addEventListener('change',async e=>{if(e.target.id==='meal-date'){addMealDate=e.target.value}else if(e.target.id==='meal-type'){addMealType=e.target.value}else if(e.target.id==='home-date'){day=e.target.value;render()}else if(e.target.id==='history-date'){historyDay=e.target.value;render()}else if(e.target.id==='meal-photo'){await changePhoto(e.target.files?.[0])}else if(e.target.id==='import-file'){await importAll(e.target.files?.[0]);e.target.value=''}});
