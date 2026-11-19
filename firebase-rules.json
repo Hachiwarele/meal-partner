@@ -2,10 +2,32 @@
   "rules": {
     ".read": false,
     ".write": false,
-    "mealPartnerUsers": {
-      "$uid": {
-        ".read": "auth != null && auth.uid === $uid",
-        ".write": "auth != null && auth.uid === $uid"
+    "mealPartnerRoomKeys": {
+      "$roomId": {
+        ".read": false,
+        ".write": "auth != null && !data.exists() && newData.hasChildren(['verifier','creator']) && newData.child('creator').val() === auth.uid && newData.child('verifier').isString() && newData.child('verifier').val().matches(/^[a-f0-9]{64}$/)",
+        ".validate": "newData.hasChildren(['verifier','creator']) && newData.child('creator').isString() && newData.child('creator').val() === auth.uid"
+      }
+    },
+    "mealPartnerRoomProofs": {
+      "$roomId": {
+        "$uid": {
+          ".read": "auth != null && auth.uid === $uid",
+          ".write": "auth != null && auth.uid === $uid && root.child('mealPartnerRoomKeys').child($roomId).child('verifier').exists() && newData.isString() && newData.val() === root.child('mealPartnerRoomKeys').child($roomId).child('verifier').val()"
+        }
+      }
+    },
+    "mealPartnerRooms": {
+      "$roomId": {
+        ".read": "auth != null && root.child('mealPartnerRoomProofs').child($roomId).child(auth.uid).exists()",
+        "v1": {
+          "$store": {
+            "$recordId": {
+              ".write": "auth != null && root.child('mealPartnerRoomProofs').child($roomId).child(auth.uid).exists() && ($store === 'meals' || $store === 'favorites' || $store === 'weights' || $store === 'settings' || $store === 'userFoods' || $store === 'aiNotes' || $store === 'aiImports') && newData.hasChildren(['schema','id','changedAt','writer','deleted']) && newData.child('schema').val() === 1 && newData.child('deleted').isBoolean() && newData.child('id').isString() && newData.child('id').val().length <= 150",
+              ".validate": "newData.child('id').isString() && newData.child('changedAt').isNumber() && newData.child('writer').isString()"
+            }
+          }
+        }
       }
     }
   }
