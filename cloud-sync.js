@@ -38,6 +38,7 @@ let room=null,showSecret=false,justCreated=false,adoptRemoteSettings=false;
 let enabled=false,busy=false,phase=CONFIGURED?'匿名認証を準備中':'Firebase設定待ち',lastError='',lastSync='',collisions=0;
 const conflictIds=new Set();
 const known=new Map(),pending=new Set();
+let needsFlush=false;
 let worker=Promise.resolve(),flushPromise=null;
 const ownerKey=OWNER_KEY;
 const enabledKey=code=>'mp-cloud-enabled-room-v1:'+code;
@@ -141,7 +142,8 @@ async function serialize(name,record){
     if(doc.photo.length>7*1024*1024)throw new Error('写真が大きすぎます。該当写真を圧縮してから同期してください。');
   }
   if(name==='meals'&&doc.photo!=null&&typeof doc.photo!=='string')throw new Error('写真を同期用に変換できませんでした');
-  return JSON.parse(JSON.stringify(doc));
+  // Firebase RTDB removes null object properties. Normalize now, so equality checks are stable.
+  return JSON.parse(JSON.stringify(doc), (key,value)=>value===null?undefined:value);
 }
 function deserialize(name,record){
   if(!record||typeof record!=='object'||typeof record.id!=='string')throw new Error('クラウドデータの形式が不正です');
@@ -167,14 +169,28 @@ async function submitOutbox(entry){
   const packet=nextPacket(data,act==='delete');
   pending.add(key);
   try{
-    await set(ref(database,currentRecordPath(room.code,entry.store,entry.recordId)),packet);
+    const expected=known.get(key);
+    const outcome=await runTransaction(
+      ref(database,currentRecordPath(room.code,entry.store,entry.recordId)),
+      current=>{
+        // Compare-and-swap: do not discard a newer change made by another device.
+        if(current&&packetToken(current)!==expected)return;
+        if(!current&&expected!=null)return;
+        return packet;
+      },
+      {applyLocally:false}
+    );
+    if(!outcome.committed){
+      if(!conflictIds.has(key)){conflictIds.add(key);collisions++;}
+      throw new Error('別端末で変更された記録があるため上書きを停止しました。バックアップを保持してください。');
+    }
     known.set(key,packetToken(packet));
     const again=(await readOutbox()).find(x=>x.id===entry.id);
     if(again&&again.changedAt===entry.changedAt)await bridge.removeOutbox(entry.id);
   }finally{pending.delete(key);}
 }
 async function flush(){
-  if(flushPromise)return flushPromise;
+  if(flushPromise){needsFlush=true;return flushPromise;}
   flushPromise=(async()=>{
     if(!enabled||!user||!navigator.onLine)return;
     const entries=(await readOutbox()).sort((a,b)=>a.changedAt-b.changedAt);
@@ -182,7 +198,10 @@ async function flush(){
       if(!STORE_NAMES.includes(entry.store)||conflictIds.has(entry.id))continue;
       await submitOutbox(entry);
     }
-  })().catch(err=>{announce('同期に失敗した変更があります',err.message||String(err));throw err}).finally(()=>{flushPromise=null});
+  })().catch(err=>{announce('同期に失敗した変更があります',err.message||String(err));throw err}).finally(()=>{
+    flushPromise=null;
+    if(needsFlush){needsFlush=false;Promise.resolve().then(()=>flush().catch(()=>{}));}
+  });
   return flushPromise;
 }
 async function appendOnlyUpload(pristine){
@@ -210,11 +229,15 @@ async function appendOnlyUpload(pristine){
         continue;
       }
       const document=await serialize(store,record);
-      await runTransaction(
+      const result=await runTransaction(
         ref(database,currentRecordPath(room.code,store,record.id)),
         current=>current===null?nextPacket(document,false):undefined,
         {applyLocally:false}
       );
+      if(result.snapshot?.exists())known.set(idKey(store,record.id),packetToken(result.snapshot.val()));
+      if(!result.committed&&result.snapshot?.exists()){
+        if(!conflictIds.has(idKey(store,record.id))){conflictIds.add(idKey(store,record.id));collisions++;}
+      }
     }
   }
   return remote;
