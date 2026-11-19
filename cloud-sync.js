@@ -112,7 +112,8 @@ async function joinRoom(code,secret,save){
   if(owner&&owner!==code)throw new Error('この端末の記録は別の共有コードに紐づいています。記録の混在を防ぐため接続を停止しました');
   const hash=await verifier(code,secret);
   // The private verifier is never readable. Firebase rules compare the proof server-side.
-  await set(ref(database,PROOFS+'/'+code+'/'+user.uid),hash);
+  try{await set(ref(database,PROOFS+'/'+code+'/'+user.uid),hash)}
+  catch(err){throw new Error('共有コード・復旧キーが一致しないか、Firebaseの匿名認証・データベースルールが未設定です：'+String(err.message||err))}
   room={code,secret};if(save)persistRoom(code,secret);
   announce('部屋への接続が完了しました');
 }
@@ -200,8 +201,11 @@ async function appendOnlyUpload(pristine){
         known.set(idKey(store,record.id),packetToken(existing));
         if(!existing.deleted&&!isSame(existing.data,await serialize(store,record))){
           const key=idKey(store,record.id);
-          conflictIds.add(key);
-          if(!outbox.includes(key))collisions++;
+          // An already-linked device may be replaying a legitimate offline edit.
+          // An unlinked new device must never overwrite the existing cloud record.
+          const trustedOffline=localStorage.getItem(ownerKey)===room.code &&
+            localStorage.getItem(enabledKey(room.code))==='yes' && outbox.includes(key);
+          if(!trustedOffline){conflictIds.add(key);collisions++;}
         }
         continue;
       }
