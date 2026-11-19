@@ -386,10 +386,10 @@ if(a==='import-trigger'){$('import-file').click();return}
   // Migration adds stores only. Existing meal/weight/favorite/photo records are never deleted or rewritten.
   dbOpen=function(){
     return new Promise((resolve,reject)=>{
-      const req=indexedDB.open('meal-partner-local',2);
+      const req=indexedDB.open('meal-partner-local',3);
       req.onupgradeneeded=()=>{
         const d=req.result;
-        for(const s of ['meals','favorites','weights','settings','userFoods','aiNotes','aiImports'])
+        for(const s of ['meals','favorites','weights','settings','userFoods','aiNotes','aiImports','cloudOutbox'])
           if(!d.objectStoreNames.contains(s))d.createObjectStore(s,{keyPath:'id'});
       };
       req.onsuccess=()=>{req.result.onversionchange=()=>req.result.close();resolve(req.result)};
@@ -839,10 +839,55 @@ if(a==='import-trigger'){$('import-file').click();return}
   });
 // MP_V3_EXTENSION_POINT
 })();
+
+/* MEAL PARTNER cloud bridge: never clears/replaces pre-existing browser databases. */
+(function prepareOptionalCloud(){
+  const records=['meals','favorites','weights','settings','userFoods','aiNotes','aiImports'];
+  const original=storeOp;
+  let readyResolve;
+  const ready=new Promise(resolve=>{readyResolve=resolve;});
+  const enqueue=async(name,action,recordId)=>{
+    if(!records.includes(name)||typeof recordId!=='string'||!recordId)return;
+    await original('cloudOutbox','put',{id:name+'|'+recordId,store:name,recordId,action,changedAt:Date.now()});
+    window.dispatchEvent(new CustomEvent('mealpartner:localwrite'));
+  };
+  storeOp=async function(name,action,value){
+    const result=await original(name,action,value);
+    if(action==='put'&&value?.id)await enqueue(name,action,value.id);
+    if(action==='delete'&&typeof value==='string')await enqueue(name,action,value);
+    return result;
+  };
+  const lastRender=render;
+  render=function(){
+    lastRender();
+    window.dispatchEvent(new CustomEvent('mealpartner:render'));
+  };
+  const prevSettings=renderSettings;
+  renderSettings=function(){
+    return prevSettings()+'<div class="section-title"><h2>☁️ クラウド同期</h2></div>'+
+      '<div id="meal-cloud-panel" class="card"><p class="small muted">設定を読み込んでいます...</p></div>';
+  };
+  window.MEAL_PARTNER_CLOUD_BRIDGE={
+    stores:records,
+    ready,
+    // Internal writes from Firebase must not trigger another cloud upload.
+    read:async(name)=>{await ready;return original(name,'all')},
+    putFromCloud:async(name,record)=>{await ready;return original(name,'put',record)},
+    deleteFromCloud:async(name,id)=>{await ready;return original(name,'delete',id)},
+    writeOutbox:async(record)=>{await ready;return original('cloudOutbox','put',record)},
+    removeOutbox:async(id)=>{await ready;return original('cloudOutbox','delete',id)},
+    rebuild:async()=>{await ready;await refresh();render()},
+    photoToDataUrl:blob=>blobDataUrl(blob),
+    photoFromDataUrl:str=>dataURLBlob(str),
+    didOpen:()=>readyResolve()
+  };
+})();
+
 document.addEventListener('click',handleClick);
 document.addEventListener('input',e=>{if(e.target.id==='meal-note'){addMealNote=e.target.value;return}if(e.target.id==='food-query'){searchText=e.target.value;renderSearchResults();updateSearchPreview();return}if(e.target.id==='food-grams'){updateSearchPreview();return}});
 document.addEventListener('change',async e=>{if(e.target.id==='meal-date'){addMealDate=e.target.value}else if(e.target.id==='meal-type'){addMealType=e.target.value}else if(e.target.id==='home-date'){day=e.target.value;render()}else if(e.target.id==='history-date'){historyDay=e.target.value;render()}else if(e.target.id==='meal-photo'){await changePhoto(e.target.files?.[0])}else if(e.target.id==='import-file'){await importAll(e.target.files?.[0]);e.target.value=''}});
-(async()=>{try{db=await dbOpen();await refresh();render()}catch(e){console.error(e);$('app').innerHTML=`<div class="card"><h2>保存機能を開けませんでした</h2><p>このブラウザではIndexedDBが利用できないようです。Safari・ChromeでGitHub Pagesの公開URLから開いてください。プライベートモードや保存制限も確認してください。</p><p class="caption">${esc(e.message||'')}</p></div>`}})();
+(async()=>{try{db=await dbOpen();await refresh();render();window.MEAL_PARTNER_CLOUD_BRIDGE?.didOpen()}catch(e){console.error(e);$('app').innerHTML=`<div class="card"><h2>保存機能を開けませんでした</h2><p>このブラウザではIndexedDBが利用できないようです。Safari・ChromeでGitHub Pagesの公開URLから開いてください。プライベートモードや保存制限も確認してください。</p><p class="caption">${esc(e.message||'')}</p></div>`}})();
 </script>
+<script type="module" src="./cloud-sync.js"></script>
 </body>
 </html>
