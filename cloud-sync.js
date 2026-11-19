@@ -13,12 +13,8 @@ const cloudKey=id=>encodeURIComponent(id).replace(/\./g,'%2E').replace(/!/g,'%21
 const uidPath=uid=>ROOT+'/'+uid+'/v1';
 const currentRecordPath=(uid,store,id)=>uidPath(uid)+'/'+store+'/'+cloudKey(id);
 const idKey=(store,id)=>store+'|'+id;
-const clientId=(()=>{try{
- const k='mp-client-id';
- let value=localStorage.getItem(k);
- if(!value){value=crypto.randomUUID?.()||String(Date.now())+'-'+Math.random();localStorage.setItem(k,value);}
- return value;
-}catch(_){return String(Date.now())+'-'+Math.random();}})();
+const packetToken=packet=>[packet.writer||'',packet.changedAt||0,packet.nonce||''].join('|');
+const clientId=crypto.randomUUID?.()||String(Date.now())+'-'+Math.random();
 let app=null,auth=null,database=null,user=null,unsubscribe=null;
 let enabled=false,busy=false,phase=CONFIGURED?'未ログイン':'Firebase設定待ち',lastError='',lastSync='',collisions=0;
 const known=new Map(),pending=new Set();
@@ -99,7 +95,7 @@ function deserialize(name,record){
   return data;
 }
 const nextPacket=(record,deleted)=>({
-  schema:1,id:record.id,changedAt:Date.now(),writer:clientId,deleted:Boolean(deleted),
+  schema:1,id:record.id,changedAt:Date.now(),writer:clientId,nonce:crypto.randomUUID?.()||String(Math.random()),deleted:Boolean(deleted),
   ...(!deleted?{data:record}:{})
 });
 async function localMap(name){return new Map((await bridge.read(name)).map(x=>[x.id,x]));}
@@ -115,7 +111,7 @@ async function submitOutbox(entry){
   pending.add(key);
   try{
     await set(ref(database,currentRecordPath(user.uid,entry.store,entry.recordId)),packet);
-    known.set(key,packet.changedAt);
+    known.set(key,packetToken(packet));
     const again=(await readOutbox()).find(x=>x.id===entry.id);
     if(again&&again.changedAt===entry.changedAt)await bridge.removeOutbox(entry.id);
   }finally{pending.delete(key);}
@@ -144,7 +140,7 @@ async function appendOnlyUpload(){
       const rid=cloudKey(record.id);
       const existing=collection[rid];
       if(existing){
-        known.set(idKey(store,record.id),Number(existing.changedAt||0));
+        known.set(idKey(store,record.id),packetToken(existing));
         if(!existing.deleted&&!isSame(existing.data,await serialize(store,record))&&!outbox.includes(idKey(store,record.id)))collisions++;
         continue;
       }
@@ -164,13 +160,13 @@ async function applyCloudSnapshot(snapshot){
     const locally=await localMap(store);
     for(const packet of Object.values(data[store]||{})){
       if(!packet||typeof packet.id!=='string'||!packet.schema)continue;
-      const key=idKey(store,packet.id),stamp=Number(packet.changedAt||0),previous=known.get(key);
+      const key=idKey(store,packet.id),stamp=packetToken(packet),previous=known.get(key);
       if(outboxIds.has(key)||pending.has(key))continue;
-      if(previous!=null&&stamp<previous)continue;
+      if(previous===stamp)continue;
       if(packet.deleted){
         // Keep pre-migration local records if they conflict with a remote tombstone;
         // apply deletion only after this client has observed the original remote revision.
-        if(previous!=null&&stamp>previous&&locally.has(packet.id)){
+        if(previous!=null&&stamp!==previous&&locally.has(packet.id)){
           await bridge.deleteFromCloud(store,packet.id);locally.delete(packet.id);count++;
         }
         known.set(key,stamp);continue;
@@ -180,7 +176,7 @@ async function applyCloudSnapshot(snapshot){
       if(!current){
         await bridge.putFromCloud(store,deserialize(store,packet.data));
         locally.set(packet.id,packet.data);count++;
-      }else if(previous!=null&&stamp>previous&&packet.writer!==clientId){
+      }else if(previous!=null&&stamp!==previous&&packet.writer!==clientId){
         await bridge.putFromCloud(store,deserialize(store,packet.data));
         locally.set(packet.id,packet.data);count++;
       }else if(previous==null){
