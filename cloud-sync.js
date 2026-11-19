@@ -16,6 +16,7 @@ const uidPath=room=>ROOT+'/'+room+'/v1';
 const currentRecordPath=(room,store,id)=>uidPath(room)+'/'+store+'/'+cloudKey(id);
 const ROOM_ALPHABET='23456789ABCDEFGHJKLMNPQRSTUVWXYZ';
 const ROOM_STORAGE='mp-cloud-room-credentials-v1';
+const PENDING_ROOM_STORAGE='mp-cloud-pending-room-v1';
 const OWNER_KEY='mp-cloud-room-owner-v1';
 const generateRoomCode=()=>{const bytes=crypto.getRandomValues(new Uint8Array(12));return Array.from(bytes,n=>ROOM_ALPHABET[n%ROOM_ALPHABET.length]).join('');};
 const generateSecret=()=>Array.from(crypto.getRandomValues(new Uint8Array(32)),n=>n.toString(16).padStart(2,'0')).join('').toUpperCase();
@@ -28,6 +29,7 @@ async function verifier(code,key){
 }
 const formatKey=s=>s.match(/.{1,8}/g)?.join('-')||s;
 const getStoredRoom=()=>{try{return JSON.parse(localStorage.getItem(ROOM_STORAGE)||'null')}catch{return null}};
+const getPendingRoom=()=>{try{return JSON.parse(localStorage.getItem(PENDING_ROOM_STORAGE)||'null')}catch{return null}};
 const persistRoom=(code,secret)=>localStorage.setItem(ROOM_STORAGE,JSON.stringify({code,secret}));
 
 const idKey=(store,id)=>store+'|'+id;
@@ -57,7 +59,7 @@ function paint(){
   }else if(!room){
     main='<div class="notice">初回の同期前に「設定 → バックアップ → 保存」でJSONを保存してね。既存データは削除されません。</div>'+
       '<label class="small" style="display:flex;align-items:center;gap:8px;margin:12px 0"><input id="mp-cloud-backup-ok" type="checkbox" style="width:auto"><span>バックアップJSONをファイルに保存済み</span></label>'+
-      '<button class="primary wide" data-action="mp-cloud-create">✨ 自分専用の部屋を作る</button>'+
+      '<button class="primary wide" data-action="mp-cloud-create">'+(getPendingRoom()?'🔄 作成途中の部屋を再開':'✨ 自分専用の部屋を作る')+'</button>'+
       '<div class="section-title"><h3>別のSafari・ホーム画面版で接続</h3></div>'+
       '<div class="field"><label class="label" for="mp-cloud-code">共有コード（12文字）</label><input id="mp-cloud-code" maxlength="17" spellcheck="false" autocapitalize="characters" autocomplete="off" placeholder="例：ABCDEFGH2345"></div>'+
       '<div class="field"><label class="label" for="mp-cloud-key">復旧キー（64桁）</label><input id="mp-cloud-key" type="password" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="保存してある復旧キーを貼り付け"></div>'+
@@ -121,19 +123,27 @@ async function joinRoom(code,secret,save){
 async function createRoom(){
   if(!user||!database)throw new Error('匿名認証を確認してください');
   const owner=localStorage.getItem(ownerKey);
-  if(owner)throw new Error('既存の部屋との混在を防ぐため、新しい部屋を作れません。既存の部屋を使ってください');
-  const secret=generateSecret();
-  for(let attempt=0;attempt<4;attempt++){
-    const code=generateRoomCode();
+  if(owner)throw new Error('この端末は既存の部屋と紐づいているため、新しい部屋を作成できません');
+  const pending=getPendingRoom();
+  let code=pending?.code,secret=pending?.secret;
+  if(!code||!secret){
+    code=generateRoomCode();secret=generateSecret();
     try{
       await set(ref(database,KEYS+'/'+code),{verifier:await verifier(code,secret),creator:user.uid});
-      await joinRoom(code,secret,true);
-      justCreated=true;showSecret=true;announce('新しい部屋を作成しました');
-      return;
     }catch(err){
-      if(attempt===3)throw new Error('部屋の作成に失敗しました。Firebaseのルールを確認してください：'+String(err.message||err));
+      const why=String(err.code||err.message||err);
+      throw new Error('【段階1：部屋の新規登録】Firebaseに拒否されました（'+why+'）。Realtime Databaseの「ルール」に mealPartnerRoomKeys があり、公開済みか確認してね。');
     }
+    // A room key now exists on Firebase; preserve it even when joining fails.
+    localStorage.setItem(PENDING_ROOM_STORAGE,JSON.stringify({code,secret}));
   }
+  try{
+    await joinRoom(code,secret,true);
+  }catch(err){
+    throw new Error('【段階2：復旧キーによる本人確認】部屋の登録には成功しましたが、本人確認で拒否されました。Realtime Databaseの「ルール」に mealPartnerRoomProofs があるか確認してね。詳細：'+String(err.message||err));
+  }
+  localStorage.removeItem(PENDING_ROOM_STORAGE);
+  justCreated=true;showSecret=true;announce('新しい部屋を作成しました');
 }
 async function serialize(name,record){
   const doc={...record};
