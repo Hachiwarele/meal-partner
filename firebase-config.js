@@ -1,10 +1,11 @@
-// Firebase Console → プロジェクトの設定 → ウェブアプリ の公開設定を貼り付ける。
-// APIキーは公開クライアント設定です。秘密のサービスアカウント鍵は絶対にここへ入れないでください。
-// 本人認証・Realtime Database のルールを有効にするまで、クラウド同期を開始しないでください。
+// Firebase Web SDK public configuration. Do not store private service-account keys here.
 export const firebaseConfig = {
-  apiKey: "",
-  authDomain: "",
-  databaseURL: "",
-  projectId: "",
-  appId: ""
+  apiKey: "AIzaSyBf8H2Hl5ucr7BU2TuR-Cd7f0U8F5MSMbU",
+  authDomain: "meal-partner-cloud.firebaseapp.com",
+  databaseURL: "https://meal-partner-cloud-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "meal-partner-cloud",
+  storageBucket: "meal-partner-cloud.firebasestorage.app",
+  messagingSenderId: "445276456402",
+  appId: "1:445276456402:web:d23fee758a3df3199e740b",
+  measurementId: "G-YRNJZ8P1G3"
 };
