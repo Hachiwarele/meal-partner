@@ -699,6 +699,14 @@ if(a==='import-trigger'){$('import-file').click();return}
       try{fn(tx)}catch(err){tx.abort();reject(err)}
     });
   }
+  async function queueCloudOps(operations){
+    const queue=window.MEAL_PARTNER_CLOUD_BRIDGE?.queue;
+    if(!queue)return;
+    for(const [store,action,recordId] of operations){
+      try{await queue(store,action,recordId)}
+      catch(err){console.warn('Cloud outbox was not updated:',err)}
+    }
+  }
   async function importAi(raw){
     const incoming=extractJson(raw),plan=getImportPlan(incoming);
     if(plan.duplicate){toast('同じ補完データは反映済みだよ ✓');return}
@@ -710,6 +718,12 @@ if(a==='import-trigger'){$('import-file').click();return}
       for(const n of plan.noteChanges)tx.objectStore('aiNotes').put(n);
       tx.objectStore('aiImports').put(log);
     });
+    await queueCloudOps([
+      ...[...plan.changedMeals.values()].map(x=>['meals','put',x.id]),
+      ...plan.dictChanges.map(x=>['userFoods','put',x.id]),
+      ...plan.noteChanges.map(x=>['aiNotes','put',x.id]),
+      ['aiImports','put',log.id]
+    ]);
     await refresh();render();
     toast('補完'+plan.patches.length+'品・アドバイス'+plan.noteChanges.length+'件を保存したよ ✨');
   }
@@ -736,6 +750,12 @@ if(a==='import-trigger'){$('import-file').click();return}
       for(const nid of log.noteIds)tx.objectStore('aiNotes').delete(nid);
       tx.objectStore('aiImports').delete(log.id);
     });
+    await queueCloudOps([
+      ...[...changed.values()].map(x=>['meals','put',x.id]),
+      ...log.dictIds.filter(id=>{const f=userFoods.find(x=>x.id===id);return f?.sourceImport===log.id&&!f.userEdited}).map(id=>['userFoods','delete',id]),
+      ...log.noteIds.map(id=>['aiNotes','delete',id]),
+      ['aiImports','delete',log.id]
+    ]);
     await refresh();render();toast('直前の補完を取り消したよ ↩');
   }
   const numberToSave=(id,k)=>{
@@ -823,6 +843,15 @@ if(a==='import-trigger'){$('import-file').click();return}
         for(const x of b.aiNotes)if(x?.id&&dateOk(x.date))tx.objectStore('aiNotes').put(x);
         for(const x of b.aiImports)if(x?.id&&Array.isArray(x.patches))tx.objectStore('aiImports').put(x);
       });
+      await queueCloudOps([
+        ...restoreMeals.map(x=>['meals','put',x.id]),
+        ...b.favorites.filter(x=>x?.id&&x.name).map(x=>['favorites','put',x.id]),
+        ...b.weights.filter(x=>x?.id&&Number.isFinite(+x.value)).map(x=>['weights','put',x.id]),
+        ...(b.settings.id==='prefs'&&MODES[b.settings.mode]?[['settings','put','prefs']]:[]),
+        ...b.userFoods.filter(x=>x?.id&&x.name).map(x=>['userFoods','put',x.id]),
+        ...b.aiNotes.filter(x=>x?.id&&dateOk(x.date)).map(x=>['aiNotes','put',x.id]),
+        ...b.aiImports.filter(x=>x?.id&&Array.isArray(x.patches)).map(x=>['aiImports','put',x.id])
+      ]);
       await refresh();render();toast('新しい形式のバックアップを復元したよ ✓');
     }catch(err){console.error(err);toast('復元できませんでした：'+(err.message||err))}
   };
@@ -876,6 +905,7 @@ if(a==='import-trigger'){$('import-file').click();return}
     deleteFromCloud:async(name,id)=>{await ready;return original(name,'delete',id)},
     writeOutbox:async(record)=>{await ready;return original('cloudOutbox','put',record)},
     removeOutbox:async(id)=>{await ready;return original('cloudOutbox','delete',id)},
+    queue:enqueue,
     rebuild:async()=>{await ready;await refresh();render()},
     photoToDataUrl:blob=>blobDataUrl(blob),
     photoFromDataUrl:str=>dataURLBlob(str),
